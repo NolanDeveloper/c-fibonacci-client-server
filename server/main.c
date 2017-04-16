@@ -77,7 +77,8 @@ is_fibonacci(long n) {
   return is_square(t + 4) || is_square(t - 4);
 }
 
-static void prepare_server() {
+static void
+prepare_server() {
   int error, t;
   static struct sockaddr_in server;
   int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
