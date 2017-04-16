@@ -20,7 +20,6 @@
 #define ERROR_TAG "Error"
 
 typedef char buffer_t[1024];
-typedef char string_t[1024];
 
 struct ConnectionData {
   buffer_t buffer;
