@@ -1,3 +1,4 @@
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -12,9 +13,14 @@
 #include <math.h>
 #include <errno.h>
 
-#define PORT 20000
-#define MAX_CONNECTIONS 256
+#define MAX(a, b) ((a) < (b) ? (b) : (a))
 
+#define PORT 20000
+#define MAX_CONNECTIONS 512
+
+#define ONE_SECOND 1000
+
+#define STATS_TAG "Stats"
 #define DEBUG_TAG "Debug"
 #define INFO_TAG  "Info"
 #define ERROR_TAG "Error"
@@ -30,6 +36,7 @@ struct ConnectionData {
 static struct pollfd sockets[MAX_CONNECTIONS];
 static struct ConnectionData data[MAX_CONNECTIONS - 1];
 static int number_of_sockets;
+static int messages_sent;
 
 static void
 print_timestamp(FILE * stream) {
@@ -119,9 +126,29 @@ accept_new_client(int server_fd) {
   ++number_of_sockets;
 }
 
+static int
+send_message(int client_fd, int is_fibonacci) {
+  int result;
+  if (is_fibonacci) {
+    result = send(client_fd, "true\r\n", 6, 0);
+  } else {
+    result = send(client_fd, "false\r\n", 7, 0);
+  }
+  if (-1 == result) {
+    note(ERROR_TAG, "send failed: %s", strerror(errno));
+    return -1;
+  }
+  if (is_fibonacci) {
+    note(INFO_TAG, "'true' was sent");
+  } else {
+    note(INFO_TAG, "'false' was sent");
+  }
+  ++messages_sent;
+  return 0;
+}
+
 static void
 process_new_data(int client_fd, struct ConnectionData * data) {
-  int error;
   char * begin = data->buffer;
   int read = recv(client_fd, data->buffer + data->used,
     sizeof(data->buffer) - data->used - 1, 0);
@@ -152,21 +179,7 @@ process_new_data(int client_fd, struct ConnectionData * data) {
       goto close_connection;
     }
     begin = end_of_message + 2;
-    if (is_fibonacci(n)) {
-      error = send(client_fd, "true\r\n", 6, 0);
-      if (error < 0) {
-        note(ERROR_TAG, "send failed: %s", strerror(errno));
-        goto close_connection;
-      }
-      note(INFO_TAG, "'true' was sent");
-    } else {
-      error = send(client_fd, "false\r\n", 7, 0);
-      if (error < 0) {
-        note(ERROR_TAG, "send failed: %s", strerror(errno));
-        goto close_connection;
-      }
-      note(INFO_TAG, "'false' was sent");
-    }
+    if (-1 == send_message(client_fd, is_fibonacci(n))) goto close_connection;
   }
   data->used = read - (begin - (data->buffer + data->used));
   data->closed = 0;
@@ -190,24 +203,51 @@ clean_closed_connections() {
   number_of_sockets = d + 1;
 }
 
+static void
+show_stats_if_ready() {
+  static struct timeval prev = { 0, 0 };
+  static double max_messages_per_second = 0;
+  struct timeval now;
+  double seconds;
+  double messages_per_second;
+  if (-1 == gettimeofday(&now, NULL)) {
+      note(ERROR_TAG, "gettimeofday failed: %s", strerror(errno));
+      return;
+  }
+  seconds = (double) (now.tv_sec - prev.tv_sec) +
+    (now.tv_usec - prev.tv_usec) / 1000000.;
+  if (seconds < 1.) return;
+  messages_per_second = messages_sent / seconds;
+  max_messages_per_second = MAX(messages_per_second, max_messages_per_second);
+  note(STATS_TAG, "messages sent: %d", messages_sent);
+  note(STATS_TAG, "messages per second: %lf", messages_per_second);
+  note(STATS_TAG, "max messages per second: %lf", max_messages_per_second);
+  messages_sent = 0;
+  prev = now;
+}
+
 int
 main() {
-  int i;
+  int i, result;
   prepare_server();
   while (1) {
     note(INFO_TAG, "Polling... Number of connections: %d",
       number_of_sockets - 1);
-    if (-1 == poll(sockets, number_of_sockets, -1)) die("poll failed");
-    for (i = 0; i < number_of_sockets; ++i) {
-      struct pollfd socket = sockets[i];
-      if (!(socket.revents & POLLIN)) continue;
-      if (!i) {
-        accept_new_client(socket.fd);
-      } else {
-        process_new_data(socket.fd, &data[i - 1]);
-      }
+    result = poll(sockets, number_of_sockets, ONE_SECOND);
+    if (-1 == result) die("poll failed");
+    show_stats_if_ready();
+    if (result) {
+        for (i = 0; i < number_of_sockets; ++i) {
+          struct pollfd socket = sockets[i];
+          if (!(socket.revents & POLLIN)) continue;
+          if (!i) {
+            accept_new_client(socket.fd);
+          } else {
+            process_new_data(socket.fd, &data[i - 1]);
+          }
+        }
+        clean_closed_connections();
     }
-    clean_closed_connections();
   }
   note(INFO_TAG, "Server was stoped");
   return 0;
