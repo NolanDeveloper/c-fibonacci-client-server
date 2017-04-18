@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <netdb.h>
 
+#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,15 +13,15 @@
 
 #define PORT 20000
 
-#define NUMBERS_TO_CHECK 100000
-#define PORTION_SIZE 100
+#define PORTION_SIZE 1000
+#define PORTIONS 1000
 
 #define DEBUG_TAG  "Debug"
 #define INFO_TAG   "Info"
 #define ERROR_TAG  "Error"
 #define OUTPUT_TAG "Output"
 
-typedef char buffer_t[1024];
+typedef char buffer_t[22];
 
 static int fd;
 static int used;
@@ -59,17 +60,57 @@ die(const char * fmt, ...) {
   exit(EXIT_FAILURE);
 }
 
+static void
+send_portion(int i) {
+  int j;
+  int printed;
+  for (j = 0; j < PORTION_SIZE; ++j) {
+    printed = sprintf(message, "%d\r\n", i * PORTION_SIZE + j);
+    if (-1 == send(fd, message, printed, 0)) die("send failed");
+  }
+}
+
+static int
+receive_portion(int i) {
+  int received;
+  int is_true, is_false;
+  char * begin, * end_of_message;
+  int j;
+  begin = buffer;
+  received = recv(fd, buffer + used, sizeof(buffer) - used - 1, 0);
+  if (-1 == received) die("recv failed");
+  if (!received) {
+    note(INFO_TAG, "Connection was closed by server");
+    return 1;
+  }
+  buffer[used + received] = '\0';
+  j = 0;
+  while (1) {
+    end_of_message = strstr(begin, "\r\n");
+    if (!end_of_message && begin == buffer) die("Message is too long");
+    if (!end_of_message) break;
+    *end_of_message = '\0';
+    is_true = !strcmp(begin, "true");
+    is_false = !strcmp(begin, "false");
+    if (!is_true && !is_false) {
+      die("Unknown response:\n%s", begin);
+    } else {
+      note(OUTPUT_TAG,
+        is_true ? "%d is fibonacci number" : "%d is not fibonacci number",
+        i * PORTION_SIZE + j++);
+      begin = end_of_message + 2;
+    }
+  }
+  used = buffer + used + received - begin;
+  memmove(buffer, begin, used);
+  return 0;
+}
+
 int
 main(int argc, char * argv[]) {
   struct sockaddr_in server_address;
   struct hostent * hosts;
-  char * begin, * end_of_message;
-  int error;
-  int printed;
-  int total;
-  int bytes;
-  int i, j;
-  int is_true, is_false;
+  int i;
   if (argc != 2) die("usage: <program> server.com");
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (-1 == fd) die("Can't open socket");
@@ -87,48 +128,13 @@ main(int argc, char * argv[]) {
     die("Can't connect to server");
   }
   note(INFO_TAG, "Connected");
-  i = 0;
-  while (i < NUMBERS_TO_CHECK) {
-    total = 0;
-    for (j = 0; j < PORTION_SIZE; ++j) {
-      printed = sprintf(message + total, "%d\r\n", i + j);
-      total += printed;
-    }
-    note(DEBUG_TAG, "Sending message(%d bytes):\n%s", total, message);
-    error = send(fd, message, total, 0);
-    if (-1 == error) die("send failed");
-    j = 0;
-    while (j < PORTION_SIZE) {
-      note(DEBUG_TAG, "Receiving new portion of data");
-      bytes = recv(fd, buffer + used, sizeof(buffer) - used - 1, 0);
-      if (-1 == bytes) die("recv failed");
-      if (!bytes) {
-        note(INFO_TAG, "Connection was closed by server");
-        goto finish;
-      }
-      buffer[used + bytes] = '\0';
-      begin = buffer + used;
-      while (1) {
-        end_of_message = strstr(begin, "\r\n");
-        if (!end_of_message && begin == buffer) die("Message is too long");
-        if (!end_of_message) break;
-        *end_of_message = '\0';
-        is_true = !strcmp(begin, "true");
-        is_false = !strcmp(begin, "false");
-        if (!is_true && !is_false) {
-          die("Unknown response:\n%s", begin);
-        } else {
-          note(OUTPUT_TAG,
-            is_true ? "%d is fibonacci number" : "%d is not fibonacci number",
-            i + j++);
-          begin = end_of_message + 2;
-        }
-      }
-      used = buffer + used + bytes - begin;
-      memmove(buffer, begin, used);
-    }
-    i += PORTION_SIZE;
+  send_portion(0);
+  send_portion(1);
+  for (i = 0; i < PORTIONS - 1; ++i) {
+    if (1 == receive_portion(i)) goto finish;
+    send_portion(i + 1);
   }
+  receive_portion(PORTIONS - 1);
 finish:
   close(fd);
   return 0;

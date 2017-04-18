@@ -16,9 +16,7 @@
 #define MAX(a, b) ((a) < (b) ? (b) : (a))
 
 #define PORT 20000
-#define MAX_CONNECTIONS 512
-
-#define ONE_SECOND 1000
+#define MAX_CONNECTIONS 1024
 
 #define STATS_TAG "Stats"
 #define DEBUG_TAG "Debug"
@@ -149,19 +147,22 @@ send_message(int client_fd, int is_fibonacci) {
 
 static void
 process_new_data(int client_fd, struct ConnectionData * data) {
-  char * begin = data->buffer;
-  int read = recv(client_fd, data->buffer + data->used,
+  int error;
+  char * begin;
+  int received;
+  begin = data->buffer;
+  received = recv(client_fd, data->buffer + data->used,
     sizeof(data->buffer) - data->used - 1, 0);
-  if (!read) {
+  if (!received) {
     note(DEBUG_TAG, "Connection was closed by client");
     goto close_connection;
   }
-  if (-1 == read) {
+  if (-1 == received) {
     note(ERROR_TAG, "recv failed: %s", strerror(errno));
     goto close_connection;
   }
-  data->buffer[data->used + read] = '\0';
-  note(DEBUG_TAG, "%d bytes were received:\n%s", read,
+  data->buffer[data->used + received] = '\0';
+  note(DEBUG_TAG, "%d bytes were received:\n%s", received,
     data->buffer + data->used);
   while (1) {
     char * end_of_message;
@@ -181,11 +182,12 @@ process_new_data(int client_fd, struct ConnectionData * data) {
     begin = end_of_message + 2;
     if (-1 == send_message(client_fd, is_fibonacci(n))) goto close_connection;
   }
-  data->used = read - (begin - (data->buffer + data->used));
+  data->used = received - (begin - (data->buffer + data->used));
   data->closed = 0;
   memmove(data->buffer, begin, data->used);
   data->buffer[data->used] = '\0';
-  note(DEBUG_TAG, "Buffered data(%d bytes):\n%s", data->used, data->buffer);
+  note(DEBUG_TAG, "Buffered data(%d bytes):\n%s", data->used,
+    data->buffer);
   return;
 close_connection:
   data->closed = 1;
