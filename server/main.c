@@ -16,14 +16,14 @@
 #define MAX(a, b) ((a) < (b) ? (b) : (a))
 
 #define PORT 20000
-#define MAX_CONNECTIONS 1024
+#define MAX_CONNECTIONS 10001
 
-#define STATS_TAG "Stats"
 #define DEBUG_TAG "Debug"
+#define STATS_TAG "Stats"
 #define INFO_TAG  "Info"
 #define ERROR_TAG "Error"
 
-typedef char buffer_t[1024];
+typedef char buffer_t[25];
 
 struct ConnectionData {
   buffer_t buffer;
@@ -32,9 +32,10 @@ struct ConnectionData {
 };
 
 static struct pollfd sockets[MAX_CONNECTIONS];
-static struct ConnectionData data[MAX_CONNECTIONS - 1];
+static struct ConnectionData data[MAX_CONNECTIONS];
 static int number_of_sockets;
 static int messages_sent;
+static int verbose;
 
 static void
 print_timestamp(FILE * stream) {
@@ -46,6 +47,7 @@ print_timestamp(FILE * stream) {
 
 static void
 vnote(const char * type, const char * fmt, va_list ap) {
+  if (!verbose && strcmp(ERROR_TAG, type)) return;
   print_timestamp(stdout);
   printf(" (%s): ", type);
   vprintf(fmt, ap);
@@ -83,7 +85,7 @@ is_fibonacci(long n) {
 }
 
 static void
-prepare_server() {
+prepare_server(void) {
   int error, t;
   static struct sockaddr_in server;
   int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -100,9 +102,9 @@ prepare_server() {
   error = listen(server_fd, 128);
   if (-1 == error) die("Could not listen on socket");
   note(DEBUG_TAG, "Server socket's in listen mode");
-  sockets[number_of_sockets].fd = server_fd;
-  sockets[number_of_sockets].events = POLLIN;
-  ++number_of_sockets;
+  sockets[0].fd = server_fd;
+  sockets[0].events = POLLIN;
+  number_of_sockets = 1;
 }
 
 static void
@@ -147,9 +149,9 @@ send_message(int client_fd, int is_fibonacci) {
 
 static void
 process_new_data(int client_fd, struct ConnectionData * data) {
-  int error;
-  char * begin;
+  char * begin, * end_of_message;
   int received;
+  long n;
   begin = data->buffer;
   received = recv(client_fd, data->buffer + data->used,
     sizeof(data->buffer) - data->used - 1, 0);
@@ -165,8 +167,6 @@ process_new_data(int client_fd, struct ConnectionData * data) {
   note(DEBUG_TAG, "%d bytes were received:\n%s", received,
     data->buffer + data->used);
   while (1) {
-    char * end_of_message;
-    long n;
     end_of_message = strstr(begin, "\r\n");
     if (!end_of_message && begin == data->buffer) {
       note(ERROR_TAG, "Message is too long:\n%s", begin);
@@ -194,27 +194,28 @@ close_connection:
 }
 
 static void
-clean_closed_connections() {
+clean_closed_connections(void) {
   int s, d;
-  for (s = d = 0; s != number_of_sockets - 1; ++s) {
+  if (data[0].closed) die("Server socket was closed");
+  for (s = d = 1; s < number_of_sockets; ++s) {
     if (data[s].closed) continue;
-    sockets[d + 1] = sockets[s + 1];
+    sockets[d] = sockets[s];
     data[d] = data[s];
     ++d;
   }
-  number_of_sockets = d + 1;
+  number_of_sockets = d;
 }
 
 static void
-show_stats_if_ready() {
+show_stats_if_ready(void) {
   static struct timeval prev = { 0, 0 };
   static double max_messages_per_second = 0;
   struct timeval now;
   double seconds;
   double messages_per_second;
   if (-1 == gettimeofday(&now, NULL)) {
-      note(ERROR_TAG, "gettimeofday failed: %s", strerror(errno));
-      return;
+    note(ERROR_TAG, "gettimeofday failed: %s", strerror(errno));
+    return;
   }
   seconds = (double) (now.tv_sec - prev.tv_sec) +
     (now.tv_usec - prev.tv_usec) / 1000000.;
@@ -228,27 +229,47 @@ show_stats_if_ready() {
   prev = now;
 }
 
+static void
+show_usage(char * program) {
+  die("usage: %s [-h] [-v]\n",
+    "-h for showing this help\n",
+    "-v for verbose mode", program);
+}
+
+static void
+process_arguments(int argc, char * argv[]) {
+  int i;
+  char * argument;
+  for (i = 1; i < argc; ++i) {
+    argument = argv[i];
+    if (!strcmp("-h", argument)) show_usage(argv[0]);
+    else if (!strcmp("-v", argument)) verbose = 1;
+  }
+}
+
 int
-main() {
-  int i, result;
+main(int argc, char * argv[]) {
+  int i, n, result;
+  process_arguments(argc, argv);
   prepare_server();
   while (1) {
     note(INFO_TAG, "Polling... Number of connections: %d",
       number_of_sockets - 1);
-    result = poll(sockets, number_of_sockets, ONE_SECOND);
+    result = poll(sockets, number_of_sockets, -1);
     if (-1 == result) die("poll failed");
     show_stats_if_ready();
     if (result) {
-        for (i = 0; i < number_of_sockets; ++i) {
-          struct pollfd socket = sockets[i];
-          if (!(socket.revents & POLLIN)) continue;
-          if (!i) {
-            accept_new_client(socket.fd);
-          } else {
-            process_new_data(socket.fd, &data[i - 1]);
-          }
+      n = number_of_sockets;
+      for (i = 0; i < n; ++i) {
+        struct pollfd socket = sockets[i];
+        if (!(socket.revents & POLLIN)) continue;
+        if (!i) {
+          accept_new_client(socket.fd);
+        } else {
+          process_new_data(socket.fd, &data[i]);
         }
-        clean_closed_connections();
+      }
+      clean_closed_connections();
     }
   }
   note(INFO_TAG, "Server was stoped");

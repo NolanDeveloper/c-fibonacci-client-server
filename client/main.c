@@ -26,6 +26,8 @@ typedef char buffer_t[22];
 static int fd;
 static int used;
 static buffer_t buffer, message;
+static char * server_url;
+static int verbose;
 
 static void
 print_timestamp(FILE * stream) {
@@ -36,6 +38,7 @@ print_timestamp(FILE * stream) {
 
 static void
 vnote(const char * type, const char * fmt, va_list ap) {
+  if (!verbose && strcmp(ERROR_TAG, type)) return;
   print_timestamp(stdout);
   printf(" (%s): ", type);
   vprintf(fmt, ap);
@@ -76,34 +79,55 @@ receive_portion(int i) {
   int is_true, is_false;
   char * begin, * end_of_message;
   int j;
-  begin = buffer;
-  received = recv(fd, buffer + used, sizeof(buffer) - used - 1, 0);
-  if (-1 == received) die("recv failed");
-  if (!received) {
-    note(INFO_TAG, "Connection was closed by server");
-    return 1;
-  }
-  buffer[used + received] = '\0';
-  j = 0;
-  while (1) {
-    end_of_message = strstr(begin, "\r\n");
-    if (!end_of_message && begin == buffer) die("Message is too long");
-    if (!end_of_message) break;
-    *end_of_message = '\0';
-    is_true = !strcmp(begin, "true");
-    is_false = !strcmp(begin, "false");
-    if (!is_true && !is_false) {
-      die("Unknown response:\n%s", begin);
-    } else {
-      note(OUTPUT_TAG,
-        is_true ? "%d is fibonacci number" : "%d is not fibonacci number",
-        i * PORTION_SIZE + j++);
-      begin = end_of_message + 2;
+  for (j = 0; j < PORTION_SIZE;) {
+    begin = buffer;
+    received = recv(fd, buffer + used, sizeof(buffer) - used - 1, 0);
+    if (-1 == received) die("recv failed");
+    if (!received) {
+      note(INFO_TAG, "Connection was closed by server");
+      return 1;
     }
+    buffer[used + received] = '\0';
+    note(INFO_TAG, "Got bytes:\n%s", buffer + used);
+    while (j < PORTION_SIZE) {
+      end_of_message = strstr(begin, "\r\n");
+      if (!end_of_message && begin == buffer) die("Message is too long");
+      if (!end_of_message) break;
+      *end_of_message = '\0';
+      is_true = !strcmp(begin, "true");
+      is_false = !strcmp(begin, "false");
+      if (!is_true && !is_false) {
+        die("Unknown response:\n%s", begin);
+      } else {
+        note(OUTPUT_TAG,
+          is_true ? "%d is fibonacci number" : "%d is not fibonacci number",
+          i * PORTION_SIZE + j++);
+        begin = end_of_message + 2;
+      }
+    }
+    used = buffer + used + received - begin;
+    memmove(buffer, begin, used);
   }
-  used = buffer + used + received - begin;
-  memmove(buffer, begin, used);
   return 0;
+}
+
+static void
+show_usage(char * program) {
+  die("usage: %s server.com", program);
+}
+
+static void
+process_arguments(int argc, char * argv[]) {
+  char * argument;
+  int i;
+  for (i = 1; i < argc; ++i) {
+    argument = argv[i];
+    if (!strcmp("-h", argument)) show_usage(argv[0]);
+    else if (!strcmp("-v", argument)) verbose = 1;
+    else if (!server_url) {
+      server_url = argument;
+    } else show_usage(argv[0]);
+  }
 }
 
 int
@@ -111,7 +135,7 @@ main(int argc, char * argv[]) {
   struct sockaddr_in server_address;
   struct hostent * hosts;
   int i;
-  if (argc != 2) die("usage: <program> server.com");
+  process_arguments(argc, argv);
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (-1 == fd) die("Can't open socket");
   note(DEBUG_TAG, "Created socket");
@@ -130,10 +154,11 @@ main(int argc, char * argv[]) {
   note(INFO_TAG, "Connected");
   send_portion(0);
   send_portion(1);
-  for (i = 0; i < PORTIONS - 1; ++i) {
+  for (i = 0; i < PORTIONS - 2; ++i) {
     if (1 == receive_portion(i)) goto finish;
-    send_portion(i + 1);
+    send_portion(i + 2);
   }
+  receive_portion(PORTIONS - 2);
   receive_portion(PORTIONS - 1);
 finish:
   close(fd);
